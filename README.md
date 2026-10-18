@@ -1,5 +1,7 @@
 # Flappy-bird-deluxe-version
 in day 1 i made the difficulties , skins , items , background and  sound 
+
+
 Here is the code : 
 import array
 import json
@@ -13,11 +15,6 @@ import tempfile
 import time
 import tkinter as tk
 import wave
-
-try:
-    import winsound             
-except ImportError:
-    winsound = None
 
 WIDTH, HEIGHT = 480, 720
 GROUND_Y = 630          
