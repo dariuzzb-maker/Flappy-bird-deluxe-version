@@ -1,0 +1,681 @@
+HERE IS THE FULL CODE FOR THE GAME , INSTALL VS CODE AND PASTE THE CODE , AND PRESS PLAY 
+
+// COPY FROM HERE -----
+
+import array
+import json
+import math
+import os
+import random
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import tkinter as tk
+import wave
+
+try:
+    import winsound             
+except ImportError:
+    winsound = None
+
+WIDTH, HEIGHT = 480, 720
+GROUND_Y = 630          
+BIRD_X = 120            
+PIPE_WIDTH = 70
+PIPE_SPACING = 250      
+FPS = 60
+
+
+DIFFICULTIES = {
+    "EASY":   {"gravity": 0.40, "flap": -7.2, "speed": 2.5, "gap": 210, "moving": 0.0, "points": 1, "color": (110, 230, 120)},
+    "NORMAL": {"gravity": 0.45, "flap": -7.6, "speed": 2.9, "gap": 185, "moving": 0.2, "points": 2, "color": (255, 220, 80)},
+    "HARD":   {"gravity": 0.50, "flap": -8.0, "speed": 3.4, "gap": 160, "moving": 0.4, "points": 3, "color": (255, 140, 60)},
+    "INSANE": {"gravity": 0.56, "flap": -8.4, "speed": 4.0, "gap": 140, "moving": 0.6, "points": 4, "color": (255, 70, 70)},
+}
+
+SKINS = [
+    ("YELLOW", (255, 205, 50), (255, 240, 130)),
+    ("RED",    (235, 70, 85),  (255, 150, 160)),
+    ("BLUE",   (70, 160, 240), (160, 210, 255)),
+]
+
+ITEMS = {
+    "shield":  ("S",  (80, 170, 255)),    
+    "double":  ("x2", (255, 200, 40)),    
+    "shrink":  ("-",  (110, 225, 120)),   
+    "mystery": ("?",  (255, 255, 255)),   
+}
+
+MYSTERY_RESULTS = ["shield", "double", "shrink", "bonus", "heavy", "fast"]
+EFFECT_TIME = {"double": 600, "shrink": 600, "heavy": 300, "fast": 300}   # in frames
+EFFECT_TEXT = {"shield": "SHIELD", "double": "DOUBLE POINTS", "shrink": "SHRINK",
+               "heavy": "HEAVY BIRD...", "fast": "SPEED SURGE!", "bonus": "BONUS +20"}
+
+
+SKY_COLORS = [(110, 195, 255), (255, 160, 110), (25, 30, 70)]
+
+FONT_PIXELS = {24: 19, 32: 26, 44: 34, 70: 54, 100: 76}
+
+SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "flappy_save.json")
+
+def rgb(color):
+    
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(c))) for c in color)
+
+SOUND_DEFS = {
+    "flap":     ("square", 0.15, [(380, 620, 0.09)]),
+    "score":    ("square", 0.18, [(700, 700, 0.06), (1050, 1050, 0.12)]),
+    "coin":     ("sine",   0.30, [(1300, 1300, 0.05), (1750, 1750, 0.10)]),
+    "powerup":  ("saw",    0.18, [(440, 440, 0.05), (554, 554, 0.05), (659, 659, 0.05), (880, 880, 0.14)]),
+    "bad":      ("saw",    0.22, [(400, 110, 0.38)]),
+    "dash":     ("saw",    0.12, [(200, 1000, 0.28)]),
+    "shield":   ("sine",   0.40, [(1600, 200, 0.30)]),
+    "hit":      ("noise",  0.45, [(1, 1, 0.35)]),
+    "gameover": ("tri",    0.40, [(523, 523, 0.15), (494, 494, 0.15), (440, 440, 0.15), (349, 349, 0.45)]),
+    "select":   ("square", 0.12, [(900, 900, 0.04)]),
+}
+
+class Sounds:
+    RATE = 22050
+
+    def __init__(self):
+        self.muted = False
+        self.files = {}
+        self.player = None                      
+        if winsound is None:
+            for command in ("afplay", "paplay", "aplay"):
+                if shutil.which(command):
+                    self.player = command
+                    break
+        self.ok = winsound is not None or self.player is not None
+        self.folder = tempfile.mkdtemp(prefix="flappy_")
+        if self.ok:
+            for name, (shape, volume, notes) in SOUND_DEFS.items():
+                self.files[name] = self.make_file(name, shape, volume, notes)
+
+    def make_file(self, name, shape, volume, notes):
+        """Turn a list of notes into a .wav file and return its path."""
+        data = array.array("h")
+        phase = 0.0
+        for start_freq, end_freq, seconds in notes:
+            count = int(self.RATE * seconds)
+            for i in range(count):
+                t = i / count                                    
+                freq = start_freq + (end_freq - start_freq) * t
+                phase = (phase + freq / self.RATE) % 1.0
+                if shape == "square":
+                    value = 1.0 if phase < 0.5 else -1.0
+                elif shape == "saw":
+                    value = 2 * phase - 1
+                elif shape == "tri":
+                    value = 4 * abs(phase - 0.5) - 1
+                elif shape == "noise":
+                    value = random.uniform(-1, 1)
+                else:
+                    value = math.sin(2 * math.pi * phase)
+                fade = (1 - t) * min(1.0, i / 80, (count - i) / 80)    
+                data.append(int(value * fade * volume * 32767))
+        if sys.byteorder == "big":
+            data.byteswap()
+        path = os.path.join(self.folder, name + ".wav")
+        with wave.open(path, "wb") as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(self.RATE)
+            f.writeframes(data.tobytes())
+        return path
+
+    def play(self, name):
+        if not self.ok or self.muted:
+            return
+        try:
+            if winsound:
+                winsound.PlaySound(self.files[name], winsound.SND_FILENAME | winsound.SND_ASYNC)
+            else:
+                subprocess.Popen([self.player, self.files[name]],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass                                 
+
+    def close(self):
+        if winsound:
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+def load_best():
+    best = {name: 0 for name in DIFFICULTIES}
+    try:
+        with open(SAVE_FILE) as f:
+            best.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+    return best
+
+def save_best(best):
+    try:
+        with open(SAVE_FILE, "w") as f:
+            json.dump(best, f)
+    except OSError:
+        pass
+
+class Pipe:
+    
+
+    def __init__(self, x, gap_y, gap, moving):
+        self.x = x
+        self.base_y = gap_y             
+        self.gap = gap
+        self.moving = moving            
+        self.golden = random.random() < 0.06    
+        self.passed = False
+        self.age = random.uniform(0, 100)
+
+    @property
+    def gap_y(self):
+        if self.moving:
+            return self.base_y + math.sin(self.age * 0.05) * 45
+        return self.base_y
+
+class Game:
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("Flappy Bird")
+        self.root.resizable(False, False)
+        self.canvas = tk.Canvas(self.root, width=WIDTH, height=HEIGHT, highlightthickness=0, bg="black")
+        self.canvas.pack()
+        self.root.bind("<KeyPress>", self.key_down)
+        self.root.bind("<KeyRelease>", self.key_up)
+        self.root.bind("<FocusOut>", lambda e: self.pressed.clear())
+        self.root.protocol("WM_DELETE_WINDOW", self.quit)
+
+        self.pressed = set()            
+        self.sounds = Sounds()
+        self.best = load_best()
+        self.difficulty = "NORMAL"
+        self.skin = 0
+        self.frame = 0
+        self.ground_x = 0
+        self.sky = list(SKY_COLORS[0])
+        self.start_round()
+        self.state = "menu"             
+
+    def start_round(self):
+        
+        self.cfg = DIFFICULTIES[self.difficulty]
+        self.state = "ready"
+        self.bird_y = HEIGHT / 2 - 50
+        self.vy = 0.0
+        self.score = 0
+        self.pipes_passed = 0
+        self.pipes = []
+        self.pickups = []               
+        self.particles = []
+        self.effects = {}               
+        self.invincible = 0             
+        self.energy = 100.0             
+        self.slowing = False
+        self.dash_time = 0
+        self.dash_cooldown = 0
+        self.last_gap_y = GROUND_Y / 2
+        self.dead_time = 0
+        self.flash = 0
+        self.new_best = False
+        self.message = ""
+        self.message_time = 0
+        self.add_pipe(WIDTH + 160)
+
+    def add_pipe(self, x):
+        
+        cfg = self.cfg
+        gap = max(cfg["gap"] - 50, cfg["gap"] - self.pipes_passed * 1.5)   
+        low = max(80 + gap / 2, self.last_gap_y - 140)               
+        high = min(GROUND_Y - 80 - gap / 2, self.last_gap_y + 140)   
+        gap_y = random.uniform(low, high)
+        moving = self.pipes_passed >= 3 and random.random() < cfg["moving"]
+        if self.pipes:
+            self.add_loot((self.pipes[-1].x + x) / 2 + PIPE_WIDTH / 2,
+                          (self.last_gap_y + gap_y) / 2)
+        self.pipes.append(Pipe(x, gap_y, gap, moving))
+        self.last_gap_y = gap_y
+
+    def add_loot(self, x, y):
+        
+        roll = random.random()
+        if roll < 0.30:
+            kind = random.choice(list(ITEMS))
+            self.pickups.append({"x": x, "y": y, "kind": kind})
+        elif roll < 0.70:
+            for i in range(-1, 2):
+                self.pickups.append({"x": x + i * 30, "y": y - 20 + abs(i) * 15, "kind": "coin"})
+
+    @property
+    def radius(self):
+        return 10 if "shrink" in self.effects else 15
+
+
+    def key_down(self, event):
+        key = event.keysym.lower()
+        if key in self.pressed:         
+            return
+        self.pressed.add(key)
+        self.on_key(key)
+
+    def key_up(self, event):
+        self.pressed.discard(event.keysym.lower())
+
+    def on_key(self, key):
+        if key == "m":
+            self.sounds.muted = not self.sounds.muted
+            return
+
+        if self.state == "menu":
+            names = list(DIFFICULTIES)
+            if key == "left":
+                self.difficulty = names[(names.index(self.difficulty) - 1) % len(names)]
+                self.sounds.play("select")
+            elif key == "right":
+                self.difficulty = names[(names.index(self.difficulty) + 1) % len(names)]
+                self.sounds.play("select")
+            elif key in ("up", "down"):
+                self.skin = (self.skin + (1 if key == "down" else -1)) % len(SKINS)
+                self.sounds.play("select")
+            elif key in ("return", "space"):
+                self.start_round()
+            elif key == "escape":
+                self.quit()
+            return
+
+        if key == "escape":
+            self.state = "menu"
+        elif key == "p" and self.state in ("play", "pause"):
+            self.state = "pause" if self.state == "play" else "play"
+        elif self.state == "dead":
+            if self.dead_time > 40 and key in ("space", "return"):
+                self.start_round()
+        elif self.state in ("ready", "play"):
+            if key in ("space", "up", "w"):
+                self.state = "play"
+                self.vy = self.cfg["flap"]
+                self.sounds.play("flap")
+            elif key in ("shift_l", "shift_r", "d"):
+                self.dash()
+
+    def dash(self):
+        if self.state == "play" and self.dash_cooldown <= 0:
+            self.dash_time = 22
+            self.dash_cooldown = 330
+            self.sounds.play("dash")
+            self.show_message("DASH!")
+
+    def show_message(self, text):
+        self.message = text
+        self.message_time = 100
+
+    def quit(self):
+        save_best(self.best)
+        self.sounds.close()
+        self.root.destroy()
+
+    def update(self):
+    
+        self.frame += 1
+        self.update_particles()
+        self.update_sky()
+        if self.message_time > 0:
+            self.message_time -= 1
+        if self.flash > 0:
+            self.flash -= 1
+
+        if self.state == "menu":
+            self.ground_x += 1.5
+        elif self.state == "ready":
+            self.ground_x += 1.0
+            self.bird_y = HEIGHT / 2 - 50 + math.sin(self.frame * 0.1) * 8   
+        elif self.state == "play":
+            self.update_play()
+        elif self.state == "dead":
+            self.dead_time += 1
+            if self.dead_time == 30:
+                self.sounds.play("gameover")
+            if self.bird_y < GROUND_Y - 15:                  
+                self.vy = min(self.vy + 0.5, 12)
+                self.bird_y = min(self.bird_y + self.vy, GROUND_Y - 15)
+
+    def update_sky(self):
+        target = SKY_COLORS[(self.score // 20) % len(SKY_COLORS)] if self.state != "menu" else SKY_COLORS[0]
+        for i in range(3):
+            self.sky[i] += (target[i] - self.sky[i]) * 0.02
+
+    def update_particles(self):
+        for p in self.particles:             
+            p[0] += p[2]
+            p[1] += p[3]
+            p[3] += 0.15
+            p[4] -= 1
+        self.particles = [p for p in self.particles if p[4] > 0]
+
+    def burst(self, x, y, color, count=14):
+        for _ in range(count):
+            angle = random.uniform(0, math.tau)
+            speed = random.uniform(1, 5)
+            self.particles.append([x, y, math.cos(angle) * speed, math.sin(angle) * speed, 30, color])
+
+    def update_play(self):
+        cfg = self.cfg
+
+       
+        if "z" in self.pressed and self.energy > 0 and (self.slowing or self.energy > 10):
+            self.slowing = True
+            self.energy = max(0, self.energy - 0.6)
+        else:
+            self.slowing = False
+            self.energy = min(100, self.energy + 0.03)
+        slow = 0.5 if self.slowing else 1.0         
+
+    
+        for name in list(self.effects):
+            if name != "shield":
+                self.effects[name] -= 1
+                if self.effects[name] <= 0:
+                    del self.effects[name]
+        self.invincible = max(0, self.invincible - 1)
+        self.dash_time = max(0, self.dash_time - 1)
+        self.dash_cooldown = max(0, self.dash_cooldown - 1)
+
+    
+        speed = min(cfg["speed"] + self.pipes_passed * 0.05, cfg["speed"] + 2.5)
+        if self.dash_time > 0:
+            speed *= 2.2
+        if "fast" in self.effects:
+            speed *= 1.3
+        speed *= slow
+        self.ground_x += speed
+
+        
+        gravity = cfg["gravity"] * (1.5 if "heavy" in self.effects else 1.0)
+        self.vy = min(self.vy + gravity * slow, 10)
+        self.bird_y += self.vy * slow
+        if self.bird_y < self.radius:              
+            self.bird_y = self.radius
+            self.vy = 0
+
+       
+        for pipe in self.pipes:
+            pipe.x -= speed
+            pipe.age += slow
+            if not pipe.passed and pipe.x + PIPE_WIDTH < BIRD_X:
+                pipe.passed = True
+                self.pipe_passed(pipe)
+        self.pipes = [p for p in self.pipes if p.x > -PIPE_WIDTH - 10]
+        if self.pipes[-1].x <= WIDTH + 40 - PIPE_SPACING:
+            self.add_pipe(WIDTH + 40)
+
+    
+        for item in self.pickups[:]:
+            item["x"] -= speed
+            distance = math.hypot(item["x"] - BIRD_X, item["y"] - self.bird_y)
+            if distance < self.radius + 16:
+                self.pickups.remove(item)
+                self.collect(item["kind"], item["x"], item["y"])
+            elif item["x"] < -30:
+                self.pickups.remove(item)
+
+        self.check_collisions()
+
+    def pipe_passed(self, pipe):
+        points = self.cfg["points"] * (5 if pipe.golden else 1) * (2 if "double" in self.effects else 1)
+        self.score += points
+        self.pipes_passed += 1
+        self.energy = min(100, self.energy + 12)         
+        self.sounds.play("score")
+        if pipe.golden:
+            self.show_message("GOLDEN PIPE +%d" % points)
+            self.burst(BIRD_X + 30, self.bird_y, (255, 225, 90))
+
+    def collect(self, kind, x, y):
+        if kind == "coin":
+            self.score += 2 * (2 if "double" in self.effects else 1)
+            self.sounds.play("coin")
+            self.burst(x, y, (255, 215, 60), 6)
+            return
+        if kind == "mystery":                       
+            kind = random.choice(MYSTERY_RESULTS)
+        bad = kind in ("heavy", "fast")
+        self.sounds.play("bad" if bad else "powerup")
+        if kind == "bonus":
+            self.score += 20
+        elif kind == "shield":
+            self.effects["shield"] = 1
+        else:
+            self.effects[kind] = EFFECT_TIME[kind]
+        self.show_message(EFFECT_TEXT[kind])
+        self.burst(BIRD_X, self.bird_y, (255, 90, 90) if bad else (120, 255, 150), 18)
+
+    def check_collisions(self):
+        r = self.radius
+        safe = self.dash_time > 0 or self.invincible > 0      
+
+        hit = self.bird_y + r >= GROUND_Y
+        if not hit and not safe:
+            for pipe in self.pipes:
+                if BIRD_X + r > pipe.x and BIRD_X - r < pipe.x + PIPE_WIDTH:
+                    if self.bird_y - r < pipe.gap_y - pipe.gap / 2 or self.bird_y + r > pipe.gap_y + pipe.gap / 2:
+                        hit = True
+
+        if not hit:
+            return
+        if self.bird_y + r >= GROUND_Y and (safe or "shield" in self.effects):
+            self.bird_y = GROUND_Y - r - 1              
+            self.vy = self.cfg["flap"]
+        if safe:
+            return
+        if "shield" in self.effects:              
+            del self.effects["shield"]
+            self.invincible = 90
+            self.vy = self.cfg["flap"]
+            self.sounds.play("shield")
+            self.show_message("SHIELD BROKEN!")
+            self.burst(BIRD_X, self.bird_y, (120, 190, 255), 24)
+        else:
+            self.die()
+
+    def die(self):
+        self.state = "dead"
+        self.dead_time = 0
+        self.vy = -5
+        self.flash = 8
+        self.burst(BIRD_X, self.bird_y, SKINS[self.skin][1], 28)
+        if self.score > self.best[self.difficulty]:
+            self.best[self.difficulty] = self.score
+            self.new_best = True
+            save_best(self.best)
+        self.sounds.play("hit")
+
+    def text(self, string, size, color, x, y, align="center"):
+        
+        anchor = {"center": "center", "topleft": "nw", "topright": "ne", "midleft": "w"}[align]
+        font = ("Arial", -FONT_PIXELS[size], "bold")
+        self.canvas.create_text(x + 2, y + 2, text=string, fill="black", font=font, anchor=anchor)
+        self.canvas.create_text(x, y, text=string, fill=rgb(color), font=font, anchor=anchor)
+
+    def rect(self, x1, y1, x2, y2, fill, outline="", width=1):
+        self.canvas.create_rectangle(x1, y1, x2, y2, fill=rgb(fill), width=width,
+                                     outline=rgb(outline) if outline else "")
+
+    def circle(self, x, y, r, fill, outline="", width=1):
+        self.canvas.create_oval(x - r, y - r, x + r, y + r, fill=rgb(fill), width=width,
+                                outline=rgb(outline) if outline else "")
+
+    def dim(self, strength, color="black"):
+        
+        stipple = "gray25" if strength < 0.35 else "gray50" if strength < 0.7 else "gray75"
+        self.canvas.create_rectangle(0, 0, WIDTH, HEIGHT, fill=color, stipple=stipple, outline="")
+
+    def draw_bird(self, x, y, skin, radius=15):
+        _, body, wing = SKINS[skin]
+        r = radius
+        flap = math.sin(self.frame * 0.4) * r * 0.25
+        self.circle(x, y, r + 2, (60, 40, 20))                                    
+        self.circle(x, y, r, body)                                                
+        self.canvas.create_oval(x - r * 0.9, y - r * 0.1 + flap, x + r * 0.2, y + r * 0.6 + flap,
+                                fill=rgb(wing), outline="")                       
+        self.circle(x + r * 0.45, y - r * 0.3, r * 0.4, (255, 255, 255))          
+        self.circle(x + r * 0.6, y - r * 0.3, r * 0.2, (20, 20, 30))              
+        self.canvas.create_polygon(x + r * 0.8, y, x + r * 1.5, y + r * 0.25, x + r * 0.8, y + r * 0.5,
+                                   fill=rgb((255, 140, 40)), outline="")          
+
+    def draw_pipe(self, pipe):
+        x = pipe.x
+        top = pipe.gap_y - pipe.gap / 2
+        bottom = pipe.gap_y + pipe.gap / 2
+        if pipe.golden:
+            color, dark = (255, 205, 60), (170, 120, 20)
+        elif pipe.moving:
+            color, dark = (170, 110, 220), (100, 55, 150)
+        else:
+            color, dark = (90, 190, 60), (45, 110, 30)
+        w = PIPE_WIDTH
+        for x1, y1, x2, y2 in [(x + 4, -5, x + w - 4, top - 26), (x, top - 26, x + w, top),        # top pipe
+                               (x, bottom, x + w, bottom + 26), (x + 4, bottom + 26, x + w - 4, GROUND_Y)]:   # bottom
+            if y2 > y1:
+                self.rect(x1, y1, x2, y2, color, dark, 3)
+
+    def draw_pickup(self, item):
+        x = item["x"]
+        y = item["y"] + math.sin(self.frame * 0.1 + item["x"] * 0.05) * 4
+        if item["kind"] == "coin":
+            self.circle(x, y, 10, (170, 120, 20))
+            self.circle(x, y, 8, (255, 215, 60))
+        else:
+            letter, color = ITEMS[item["kind"]]
+            self.circle(x, y, 21, (255, 255, 255))
+            self.circle(x, y, 18, color)
+            self.text(letter, 32, (20, 20, 40), x, y)
+
+    def draw_world(self):
+        self.rect(0, 0, WIDTH, HEIGHT, self.sky)
+        for pipe in self.pipes:
+            self.draw_pipe(pipe)
+        for item in self.pickups:
+            self.draw_pickup(item)
+        for x, y, _, _, life, color in self.particles:
+            self.circle(x, y, max(1, life // 8), color)
+        # ground
+        self.rect(0, GROUND_Y, WIDTH, HEIGHT, (222, 190, 120))
+        self.rect(0, GROUND_Y, WIDTH, GROUND_Y + 14, (100, 200, 70))
+        for i in range(-1, WIDTH // 40 + 2):
+            x = i * 40 - int(self.ground_x) % 40
+            self.canvas.create_line(x, GROUND_Y, x - 12, GROUND_Y + 14, fill=rgb((70, 150, 50)), width=3)
+
+    def draw_player(self):
+        blink = self.invincible > 0 and (self.invincible // 4) % 2 == 1
+        if not blink:
+            self.draw_bird(BIRD_X, self.bird_y, self.skin, self.radius)
+        if "shield" in self.effects:
+            r = self.radius + 9
+            self.canvas.create_oval(BIRD_X - r, self.bird_y - r, BIRD_X + r, self.bird_y + r,
+                                    outline=rgb((150, 210, 255)), width=3)
+        if self.dash_time > 0:
+            self.circle(BIRD_X - 20, self.bird_y, 6, (255, 255, 180))
+
+    def draw_hud(self):
+        cfg = self.cfg
+        self.text(str(self.score), 100, (255, 255, 255), WIDTH // 2, 70)
+        self.text("BEST %d" % self.best[self.difficulty], 24, (255, 235, 150), WIDTH // 2, 120)
+        self.text(self.difficulty, 24, cfg["color"], WIDTH - 10, 10, "topright")
+        if self.sounds.muted:
+            self.text("MUTED", 24, (200, 200, 200), WIDTH - 10, 32, "topright")
+
+    
+        y = 14
+        for name, frames in self.effects.items():
+            label = EFFECT_TEXT[name] + ("" if name == "shield" else " %ds" % (frames // FPS + 1))
+            self.text(label, 24, (255, 255, 255), 12, y, "topleft")
+            y += 24
+    
+        self.text("SLOW-MO [Z]", 24, (255, 255, 255), 20, 650, "topleft")
+        self.rect(20, 676, 210, 690, (40, 40, 60))
+        self.rect(20, 676, 20 + 190 * self.energy / 100, 690, (190, 110, 255))
+        self.text("DASH [SHIFT]", 24, (255, 255, 255), 260, 650, "topleft")
+        ready = self.dash_cooldown <= 0
+        self.rect(260, 676, 450, 690, (40, 40, 60))
+        self.rect(260, 676, 260 + 190 * (1 if ready else 1 - self.dash_cooldown / 330), 690,
+                  (255, 230, 90) if ready else (140, 120, 60))
+
+        if self.message_time > 0:
+            self.text(self.message, 44, (255, 255, 160), WIDTH // 2, 190)
+        if self.state == "ready":
+            self.text("GET READY!", 70, (255, 225, 80), WIDTH // 2, 290)
+            self.text("press SPACE to flap", 32, (255, 255, 255), WIDTH // 2, 340)
+
+    def draw_menu(self):
+        self.text("FLAPPY BIRD", 100, (255, 225, 80), WIDTH // 2, 100)
+        self.draw_bird(WIDTH // 2, 210 + math.sin(self.frame * 0.07) * 8, self.skin, 26)
+        self.text("< %s >" % self.difficulty, 70, DIFFICULTIES[self.difficulty]["color"], WIDTH // 2, 300)
+        self.text("LEFT / RIGHT: difficulty", 24, (255, 255, 255), WIDTH // 2, 340)
+        self.text("UP / DOWN: bird color (%s)" % SKINS[self.skin][0], 24, (255, 255, 255), WIDTH // 2, 366)
+        self.text("BEST: %d" % self.best[self.difficulty], 44, (255, 235, 150), WIDTH // 2, 420)
+        self.text("press ENTER to play", 44, (255, 255, 255), WIDTH // 2, 485)
+        lines = ["SPACE = flap     SHIFT = dash", "Z (hold) = slow motion     P = pause",
+                 "M = mute     ESC = quit", "Power-ups: S shield, x2 points, - shrink, ? mystery"]
+        for i, line in enumerate(lines):
+            self.text(line, 24, (230, 240, 255), WIDTH // 2, 560 + i * 26)
+
+    def draw_game_over(self):
+        self.dim(0.5)
+        self.text("GAME OVER", 100, (255, 90, 90), WIDTH // 2, 230)
+        self.text("SCORE %d" % self.score, 70, (255, 255, 255), WIDTH // 2, 320)
+        if self.new_best:
+            self.text("NEW BEST!", 70, (255, 225, 80), WIDTH // 2, 390)
+        else:
+            self.text("BEST %d" % self.best[self.difficulty], 44, (255, 235, 150), WIDTH // 2, 390)
+        if self.dead_time > 40:
+            self.text("SPACE = retry     ESC = menu", 32, (255, 255, 255), WIDTH // 2, 470)
+
+    def draw(self):
+        self.canvas.delete("all")          
+        self.draw_world()
+        if self.state == "menu":
+            self.draw_menu()
+        else:
+            self.draw_player()
+            self.draw_hud()
+            if self.state == "dead":
+                self.draw_game_over()
+            if self.state == "pause":
+                self.dim(0.5)
+                self.text("PAUSED", 100, (255, 255, 255), WIDTH // 2, 330)
+                self.text("press P to continue", 32, (255, 255, 255), WIDTH // 2, 390)
+        if self.flash > 0:
+            self.dim(0.5, "white")
+
+    def tick(self):
+        
+        now = time.perf_counter()
+        self.accumulated += min(now - self.last_time, 0.25)
+        self.last_time = now
+        steps = 0
+        while self.accumulated >= 1 / FPS and steps < 5:
+            if self.state != "pause":
+                self.update()
+            self.accumulated -= 1 / FPS
+            steps += 1
+        if steps:
+            self.draw()
+        self.root.after(5, self.tick)
+
+    def run(self):
+        self.accumulated = 0.0
+        self.last_time = time.perf_counter()
+        self.root.focus_force()
+        self.tick()
+        self.root.mainloop()
+
+
+if __name__ == "__main__":
+    Game().run()
